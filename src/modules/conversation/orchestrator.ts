@@ -11,7 +11,7 @@ import {
 import { updateUserProfileMetrics } from "@/modules/profile/metrics";
 
 const MAX_HISTORY_TURNS = 20;
-const MAX_FILE_CONTEXT_ENTRIES = 10;
+const MAX_FILE_CONTEXT_ENTRIES = 50;
 
 export type ConversationRunInput = {
   userId: string;

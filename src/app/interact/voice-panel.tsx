@@ -10,12 +10,50 @@ type VoicePanelProps = {
   promptId: string | null;
 };
 
+function extractTextFromContent(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => extractTextFromContent(item))
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+  }
+
+  if (content && typeof content === "object") {
+    const record = content as Record<string, unknown>;
+
+    if (typeof record.text === "string") {
+      return record.text;
+    }
+
+    if (typeof record.transcript === "string") {
+      return record.transcript;
+    }
+
+    if (Array.isArray(record.content)) {
+      return record.content
+        .map((item) => extractTextFromContent(item))
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+    }
+  }
+
+  return "";
+}
+
 export function VoicePanel({ sessionUuid, userId, promptId }: VoicePanelProps) {
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const processedItemIdsRef = useRef<Set<string>>(new Set());
+  const assistantBufferRef = useRef<Map<string, string>>(new Map());
 
   const disconnect = useCallback(() => {
     peerConnectionRef.current?.close();
@@ -30,7 +68,126 @@ export function VoicePanel({ sessionUuid, userId, promptId }: VoicePanelProps) {
 
     setStatus("idle");
     setError(null);
+    processedItemIdsRef.current.clear();
+    assistantBufferRef.current.clear();
   }, []);
+
+  const logConversationEntries = useCallback(
+    async (entries: Array<{ role: "user" | "assistant"; content: string }>) => {
+      if (!entries.length || !promptId) return;
+
+      try {
+        await fetch("/api/voice/log", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            userId,
+            sessionUuid,
+            promptId,
+            entries,
+          }),
+        });
+      } catch (loggingError) {
+        console.warn("[VoicePanel] failed to log voice interaction", loggingError);
+      }
+    },
+    [promptId, sessionUuid, userId],
+  );
+
+  const handleAssistantCompletion = useCallback(
+    async (responseId: string | undefined, fallbackContent: unknown) => {
+      let text = "";
+
+      if (responseId && assistantBufferRef.current.has(responseId)) {
+        text = assistantBufferRef.current.get(responseId) ?? "";
+        assistantBufferRef.current.delete(responseId);
+      } else {
+        text = extractTextFromContent(fallbackContent);
+      }
+
+      if (text.trim().length === 0) {
+        return;
+      }
+
+      await logConversationEntries([{ role: "assistant", content: text.trim() }]);
+    },
+    [logConversationEntries],
+  );
+
+  const handleRealtimeEvent = useCallback(
+    async (payload: unknown) => {
+      if (!payload || typeof payload !== "object") return;
+      const event = payload as Record<string, unknown>;
+      const type = typeof event.type === "string" ? event.type : "";
+
+      if (type === "conversation.item.created") {
+        const item = event.item as Record<string, unknown> | undefined;
+        if (!item) return;
+
+        const itemId = typeof item.id === "string" ? item.id : undefined;
+        if (itemId && processedItemIdsRef.current.has(itemId)) {
+          return;
+        }
+        if (itemId) {
+          processedItemIdsRef.current.add(itemId);
+        }
+
+        const role =
+          item.role === "user"
+            ? "user"
+            : item.role === "assistant"
+              ? "assistant"
+              : null;
+
+        if (role !== "user") {
+          return;
+        }
+
+        const text = extractTextFromContent(item.content);
+        if (text.trim().length === 0) {
+          return;
+        }
+
+        await logConversationEntries([{ role: "user", content: text.trim() }]);
+        return;
+      }
+
+      if (type === "conversation.item.input_audio_transcription.completed") {
+        const transcript = typeof event.transcript === "string" ? event.transcript : "";
+        if (transcript.trim().length > 0) {
+          await logConversationEntries([{ role: "user", content: transcript.trim() }]);
+        }
+        return;
+      }
+
+      if (type === "response.output_text.delta") {
+        const responseId = typeof event.response_id === "string" ? event.response_id : undefined;
+        const delta = extractTextFromContent(event.delta ?? event);
+        if (!responseId || delta.length === 0) {
+          return;
+        }
+        const buffer = assistantBufferRef.current.get(responseId) ?? "";
+        assistantBufferRef.current.set(responseId, buffer + delta);
+        return;
+      }
+
+      if (type === "response.output_text.done") {
+        const responseId = typeof event.response_id === "string" ? event.response_id : undefined;
+        await handleAssistantCompletion(responseId, event.output_text ?? event);
+        return;
+      }
+
+      if (type === "response.completed") {
+        const response = event.response as Record<string, unknown> | undefined;
+        const responseId = response && typeof response.id === "string" ? response.id : undefined;
+        await handleAssistantCompletion(responseId, response);
+        return;
+      }
+    },
+    [handleAssistantCompletion, logConversationEntries],
+  );
 
   const connect = useCallback(async () => {
     try {
@@ -105,8 +262,12 @@ export function VoicePanel({ sessionUuid, userId, promptId }: VoicePanelProps) {
 
       const dataChannel = peerConnection.createDataChannel("oai-events");
       dataChannel.onmessage = (event) => {
-        // Surfacing logs in the console keeps the UI minimal; revisit if we add UX around transcript display
-        console.debug("[VoicePanel] received event", event.data);
+        try {
+          const parsed = JSON.parse(event.data);
+          void handleRealtimeEvent(parsed);
+        } catch {
+          console.debug("[VoicePanel] non-JSON realtime event", event.data);
+        }
       };
 
       const offer = await peerConnection.createOffer();
@@ -142,7 +303,7 @@ export function VoicePanel({ sessionUuid, userId, promptId }: VoicePanelProps) {
       setError(err instanceof Error ? err.message : "Unknown error");
       disconnect();
     }
-  }, [disconnect, promptId, sessionUuid, userId]);
+  }, [disconnect, handleRealtimeEvent, promptId, sessionUuid, userId]);
 
   useEffect(() => {
     return () => {
@@ -188,7 +349,7 @@ export function VoicePanel({ sessionUuid, userId, promptId }: VoicePanelProps) {
       <div className="mt-4 flex flex-col gap-2">
         <audio ref={audioRef} autoPlay playsInline controls className="w-full" />
         <p className="text-xs text-muted-foreground">
-          Status:{" "}
+          Status: {" "}
           <span className="font-medium capitalize">
             {status === "idle" ? "idle" : status}
           </span>
@@ -199,9 +360,7 @@ export function VoicePanel({ sessionUuid, userId, promptId }: VoicePanelProps) {
           </p>
         ) : null}
         {error ? (
-          <p className="text-xs text-destructive">
-            {error} — ensure microphone access is granted and env vars are set.
-          </p>
+          <p className="text-xs text-destructive">{error}</p>
         ) : null}
       </div>
     </div>

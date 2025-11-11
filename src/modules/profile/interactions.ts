@@ -67,7 +67,7 @@ export async function appendInteraction(userId: string, entry: InteractionEntry)
   await writeLog(userId, nextLog);
 }
 
-export async function loadRecentInteractions(userId: string, limit = 20) {
+export async function loadRecentInteractions(userId: string, limit = 50) {
   const log = await readLog(userId);
   if (!log) return [];
   return log.entries.slice(-limit);
@@ -91,4 +91,3 @@ export async function loadInteractionLog(userId: string) {
   const log = await readLog(userId);
   return log?.entries ?? [];
 }
-

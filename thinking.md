@@ -507,3 +507,10 @@ Next actions: With temporary steps 1–6 complete, revisit overall plan for any 
 ### Goal Category Context
 - Added helpers to derive a goal category from `goal_state.category`, defaulting to "General" when missing.
 - Both chat and voice contexts now group goals by category before appending them to the system prompt, ensuring every conversation loads current goals in their respective categories.
+
+### Voice Session Persistence
+- Added `/api/voice/log` endpoint to persist voice transcripts via `appendInteraction`, update Supabase `conversation_turns`, and refresh metrics.
+- Updated the voice panel to capture realtime events, extract user/assistant text, and send them to the logging endpoint so the interaction log reflects spoken conversations.
+- Increased the interaction context window (50 entries) for both chat and voice instructions so reconnecting loads deeper history.
+- Simplified the Supabase SSR helper to avoid cookie mutations in server components while keeping middleware updates intact.
+

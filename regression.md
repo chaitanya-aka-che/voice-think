@@ -44,3 +44,5 @@
 - **Connection happy path**: From Chrome, click Connect, allow mic access, and confirm `RTCPeerConnection` enters connected state and remote audio plays.
 - **Connection failure handling**: Revoke microphone access and retry Connect; ensure the UI surfaces an actionable error and status returns to idle after failure.
 - **Instruction parity**: Capture the `instructions` payload returned from `/api/realtime/token` and confirm it matches the composed system prompt + context used for chat completions.
+- **Voice transcript logging**: Hold a voice session, then reconnect and confirm the previous conversation transcripts appear under interaction history/goals and the realtime agent references prior turns before the session starts.
+- **Voice goal persistence**: During a voice session, state new personal goals; verify a matching record appears in Supabase `user_goals` and is referenced when reconnecting.

@@ -10,7 +10,8 @@ import {
 } from "@/modules/profile/interactions";
 
 const REALTIME_SESSION_URL = "https://api.openai.com/v1/realtime/sessions";
-const MAX_FILE_CONTEXT_ENTRIES = 10;
+const MAX_FILE_CONTEXT_ENTRIES = 50;
+const MAX_CONVERSATION_HISTORY_ENTRIES = 40;
 
 const RequestSchema = z.object({
   sessionUuid: z.string().min(1, "Missing sessionUuid"),
@@ -47,10 +48,24 @@ function extractGoalCategory(goalState: Json | null | undefined): string {
   return "General";
 }
 
+function formatConversationHistory(
+  turns: Array<Pick<Tables<"conversation_turns">, "role" | "content">>,
+) {
+  if (turns.length === 0) {
+    return [];
+  }
+
+  return [
+    "Previous conversation transcript:",
+    ...turns.map((turn) => `- ${turn.role}: ${turn.content}`),
+  ];
+}
+
 function buildContextBlock({
   prompt,
   goals,
   interactions,
+  conversationHistory,
 }: {
   prompt: {
     system_prompt: string;
@@ -65,6 +80,7 @@ function buildContextBlock({
     Pick<Tables<"user_goals">, "title" | "description" | "goal_state" | "status">
   >;
   interactions: string;
+  conversationHistory: string[];
 }) {
   const sections: string[] = [];
 
@@ -100,6 +116,8 @@ function buildContextBlock({
       }
     }
   }
+
+  sections.push(...conversationHistory);
   sections.push(interactions);
 
   return [prompt.system_prompt.trim(), sections.join("\n\n")]
@@ -118,6 +136,31 @@ export async function POST(request: Request) {
 
     const { sessionUuid, userId, promptId } = parsed.data;
     const supabase = createServiceClient();
+
+    const conversationRecord = await supabase
+      .from("conversations")
+      .select("id")
+      .eq("session_uuid", sessionUuid)
+      .eq("prompt_id", promptId)
+      .eq("status", "active")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const conversationId = conversationRecord.data?.id as string | undefined;
+
+    const conversationTurns = conversationId
+      ? (
+          (
+            await supabase
+              .from("conversation_turns")
+              .select("role, content")
+              .eq("conversation_id", conversationId)
+              .order("created_at", { ascending: true })
+              .limit(MAX_CONVERSATION_HISTORY_ENTRIES)
+          ).data ?? []
+        )
+      : [];
 
     const promptQuery = await supabase
       .from("prompts")
@@ -156,10 +199,15 @@ export async function POST(request: Request) {
     const recentInteractions = await loadRecentInteractions(userId, MAX_FILE_CONTEXT_ENTRIES);
     const interactionContext = buildInteractionContext(recentInteractions);
 
+    const conversationHistoryLines = formatConversationHistory(
+      (conversationTurns as Array<Pick<Tables<"conversation_turns">, "role" | "content">>) ?? [],
+    );
+
     const instructions = buildContextBlock({
       prompt: promptRecord,
       goals,
       interactions: interactionContext,
+      conversationHistory: conversationHistoryLines,
     });
 
     const response = await fetch(REALTIME_SESSION_URL, {
